@@ -1,0 +1,36 @@
+[package]
+name = "bazaar_log"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+description = "BazaarLog - class charity sale ledger with self-contained web UI"
+
+[[bin]]
+name = "BazaarLog"
+path = "src/main.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1.36", features = ["full"] }
+tower-http = { version = "0.5", features = ["compression-gzip", "trace", "cors"] }
+sqlx = { version = "0.7", default-features = false, features = ["any", "sqlite", "postgres", "chrono", "json", "macros", "migrate", "runtime-tokio-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+rust_xlsxwriter = "0.71"
+rust-embed = "8.4"
+argon2 = "0.5"
+prometheus = "0.13"
+once_cell = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+mime_guess = "2"
+
+# Aggressive size/performance tuning for the shipped binary.
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

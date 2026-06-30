@@ -1,0 +1,15 @@
+# Build configuration targeting Windows 7 compatibility. The default target is
+# pinned to the GNU toolchain so that running cargo build directly in this
+# directory automatically selects the gnu target, avoiding E0463 (can't find
+# core crate) errors on machines without the MSVC target installed.
+#
+# The GNU target statically links libgcc / libstdc++ / libwinpthread by
+# default, but explicitly requesting +crt-static ensures the C runtime is also
+# statically linked. The resulting exe runs on a clean Windows 7 SP1 machine
+# without any runtime DLLs.
+
+[target.x86_64-pc-windows-gnu]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[build]
+target = "x86_64-pc-windows-gnu"
