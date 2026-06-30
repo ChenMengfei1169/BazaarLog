@@ -94,7 +94,7 @@ cargo build --release --target x86_64-pc-windows-gnu
 
 Copy `BazaarLog.exe` to a folder on the target machine and double-click it.
 A console window opens showing the listen address. Open
-<http://localhost:8080> in Chrome 109 or Firefox ESR 115. On first run,
+<http://localhost:3000> in Chrome 109 or Firefox ESR 115. On first run,
 `bazaarlog.db` is created in the current directory and the database schema
 is initialized.
 

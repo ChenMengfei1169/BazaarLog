@@ -73,7 +73,7 @@ build.bat
 
 The output is `backend\target\x86_64-pc-windows-msvc\release\BazaarLog.exe`.
 Copy that single file to a Windows 7 machine, double-click it, and open
-<http://localhost:8080> in Chrome 109 or Firefox ESR 115.
+<http://localhost:3000> in Chrome 109 or Firefox ESR 115.
 
 See [docs/build.md](docs/build.md) for prerequisites and step-by-step
 instructions, and [docs/windows7-run.md](docs/windows7-run.md) for runtime

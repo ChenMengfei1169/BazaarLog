@@ -54,6 +54,6 @@ popd
 echo ==^> [4/4] Done
 echo Output: backend\target\x86_64-pc-windows-gnu\release\BazaarLog.exe
 echo Copy the exe to a Windows 7 machine and double-click it.
-echo Open http://localhost:8080 in Chrome 109 or Firefox ESR 115.
+echo Open http://localhost:3000 in Chrome 109 or Firefox ESR 115.
 
 endlocal

@@ -1,6 +1,6 @@
 # BazaarLog HTTP API
 
-All endpoints are served by the Rust backend on `http://localhost:8080`. The
+All endpoints are served by the Rust backend on `http://localhost:3000`. The
 embedded frontend is also served from the same origin, so a single
 `BazaarLog.exe` provides the full experience.
 

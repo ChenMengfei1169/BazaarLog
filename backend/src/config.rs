@@ -20,7 +20,7 @@ impl Config {
             port: env::var("BAZAARLOG_PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
-                .unwrap_or(8080),
+                .unwrap_or(3000),
             cache_ttl_secs: env::var("BAZAARLOG_CACHE_TTL_SECS")
                 .ok()
                 .and_then(|p| p.parse().ok())

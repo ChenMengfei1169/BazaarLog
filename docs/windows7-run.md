@@ -13,12 +13,12 @@ into the exe.
 2. Double-click `BazaarLog.exe`. A console window opens and prints:
 
    ```
-   starting BazaarLog database_url=sqlite://bazaarlog.db?mode=rwc host=127.0.0.1 port=8080 is_sqlite=true
-   BazaarLog listening; open http://localhost:8080
+   starting BazaarLog database_url=sqlite://bazaarlog.db?mode=rwc host=127.0.0.1 port=3000 is_sqlite=true
+   BazaarLog listening; open http://localhost:3000
    ```
 
 3. Open **Chrome 109** or **Firefox ESR 115** (the two browsers still supported
-   on Windows 7) and navigate to <http://localhost:8080>.
+   on Windows 7) and navigate to <http://localhost:3000>.
 4. The first visit shows the class selection screen. Click **New class** to
    create the first class, enter a name and a password (at least 4 characters),
    and optionally an operator name. Click **Create class**.
@@ -36,7 +36,7 @@ Close the console window, or focus it and press `Ctrl+C`.
 
 ### Changing the listen port
 
-By default, BazaarLog listens on `127.0.0.1:8080`. To change it, set environment
+By default, BazaarLog listens on `127.0.0.1:3000`. To change it, set environment
 variables before launching:
 
 ```bat
@@ -46,7 +46,7 @@ BazaarLog.exe
 ```
 
 Setting `BAZAARLOG_HOST=0.0.0.0` exposes the service on the LAN so other
-devices on the same network can open <http://<this-pc-ip>:8080>. Be mindful
+devices on the same network can open <http://<this-pc-ip>:3000>. Be mindful
 that BazaarLog has no transport-level security; only use this on a trusted
 network.
 
@@ -85,7 +85,7 @@ PostgreSQL server.
 |----------------------------|----------------------------------|--------------------------------------------------------|
 | `BAZAARLOG_DATABASE_URL`   | `sqlite://bazaarlog.db?mode=rwc` | `sqlite://` or `postgres://` connection string.        |
 | `BAZAARLOG_HOST`           | `127.0.0.1`                      | Bind address. Use `0.0.0.0` for LAN access.            |
-| `BAZAARLOG_PORT`           | `8080`                           | Listen port.                                           |
+| `BAZAARLOG_PORT`           | `3000`                           | Listen port.                                           |
 | `BAZAARLOG_CACHE_TTL_SECS` | `30`                             | TTL for the in-memory report cache.                    |
 | `BAZAARLOG_ARCHIVE_DAYS`   | `365`                            | Days after `end_date` before a semester auto-archives. |
 | `RUST_LOG`                 | `info`                           | tracing filter (e.g. `debug,sqlx=warn`).               |
