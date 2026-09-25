@@ -44,13 +44,22 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id             BIGSERIAL PRIMARY KEY,
-    transaction_id BIGINT REFERENCES transactions(id) ON DELETE SET NULL,
+    -- Plain nullable column, deliberately WITHOUT a foreign key. Audit rows are
+    -- immutable evidence: a FK with ON DELETE SET NULL would rewrite the
+    -- create/update entries (and their chain hashes) whenever a transaction is
+    -- deleted, breaking the tamper-evident chain on a normal operation.
+    transaction_id BIGINT,
     class_id       BIGINT REFERENCES classes(id) ON DELETE CASCADE,
     action         TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
     operator       TEXT NOT NULL,
     payload_before TEXT,
     payload_after  TEXT,
-    occurred_at    TEXT NOT NULL DEFAULT to_char(CLOCK_TIMESTAMP() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+    occurred_at    TEXT NOT NULL DEFAULT to_char(CLOCK_TIMESTAMP() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'),
+    -- Tamper-evident chain: prev_hash points at the previous row's entry_hash
+    -- and entry_hash commits this row's content to SHA-256. Any deletion or
+    -- edit breaks every subsequent link (see audit.rs).
+    prev_hash      TEXT NOT NULL DEFAULT '',
+    entry_hash     TEXT NOT NULL DEFAULT ''
 );
 
 -- Composite indexes for the hot list/filter paths.

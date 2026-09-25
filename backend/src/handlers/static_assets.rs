@@ -13,18 +13,21 @@ use rust_embed::RustEmbed;
 #[folder = "static/"]
 struct StaticAsset;
 
-pub async fn static_handler(req: Request) -> Response {
-    // Only GET/HEAD may be answered here; axum's method routing already
+/// Serves an embedded file, or the single-page-app shell for a path that has no
+/// matching asset.
+pub async fn static_handler(request: Request) -> Response {
+    // Only GET and HEAD may be answered here. axum's method routing already
     // rejects wrong methods on registered routes, but the fallback would
-    // otherwise answer a POST/PUT/DELETE to an unknown path with a 200 page.
-    if !matches!(req.method(), &Method::GET | &Method::HEAD) {
+    // otherwise answer a POST, PUT, or DELETE to an unknown path with a 200
+    // page.
+    if !matches!(request.method(), &Method::GET | &Method::HEAD) {
         return Response::builder()
             .status(StatusCode::METHOD_NOT_ALLOWED)
             .header(header::ALLOW, "GET, HEAD")
             .body(Body::from("method not allowed"))
             .expect("method not allowed response");
     }
-    let path = trim_leading_slash(req.uri().path());
+    let path = trim_leading_slash(request.uri().path());
     // Unknown /api/* paths get a JSON 404 instead of the SPA shell so API
     // clients and scanners never mistake an HTML page for a successful call.
     if path.starts_with("api/") {
@@ -34,8 +37,8 @@ pub async fn static_handler(req: Request) -> Response {
             .body(Body::from("{\"error\":\"not found\"}"))
             .expect("api not found response");
     }
-    // Track whether we are serving the SPA fallback so the correct MIME type
-    // and cache headers are applied. Without this, a deep-link like
+    // Track the path the response is actually built from so the correct MIME
+    // type and cache headers are applied. Without this, a deep link such as
     // "/transactions" would be served as index.html but MIME-detected as
     // application/octet-stream because the path has no ".html" extension.
     let (asset, served_path) = match StaticAsset::get(path) {
@@ -50,24 +53,24 @@ pub async fn static_handler(req: Request) -> Response {
         Some(file) => {
             let mime = from_path(served_path).first_or_octet_stream();
             let body = Body::from(file.data.into_owned());
-            let mut resp = Response::builder()
+            let mut response = Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, mime.as_ref())
                 .body(body)
                 .expect("static asset response");
-            if served_path != "index.html" {
+            if served_path == "index.html" {
+                // The shell must be revalidated so a new build is picked up.
+                response
+                    .headers_mut()
+                    .insert(header::CACHE_CONTROL, "no-cache".parse().unwrap());
+            } else {
                 // Hashed filenames make immutable assets safe to cache hard.
-                resp.headers_mut().insert(
+                response.headers_mut().insert(
                     header::CACHE_CONTROL,
                     "public, max-age=31536000, immutable".parse().unwrap(),
                 );
-            } else {
-                resp.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    "no-cache".parse().unwrap(),
-                );
             }
-            resp
+            response
         }
         None => Response::builder()
             .status(StatusCode::NOT_FOUND)
@@ -76,6 +79,6 @@ pub async fn static_handler(req: Request) -> Response {
     }
 }
 
-fn trim_leading_slash(p: &str) -> &str {
-    p.strip_prefix('/').unwrap_or(p)
+fn trim_leading_slash(path: &str) -> &str {
+    path.strip_prefix('/').unwrap_or(path)
 }

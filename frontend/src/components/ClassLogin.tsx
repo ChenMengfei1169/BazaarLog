@@ -1,11 +1,13 @@
 // Class selection and authentication screen. Lists every class so the user
-// can pick one, then prompts for that class's password. On success the
-// password is held in memory by the api module and the parent component
-// switches to the main application view.
+// can pick one, then prompts for that class's password. On success the parent
+// switches to the main application view; the password is used only for this
+// request and is never retained (the returned session token is the credential
+// the API accepts from then on).
 import { useEffect, useState } from 'react';
 
 import { api } from '../api';
-import type { BazaarClass } from '../types';
+import { solveProofOfWork } from '../crypto';
+import type { BazaarClass, CreateChallenge } from '../types';
 
 interface AuthResponse {
   authenticated: boolean;
@@ -18,7 +20,6 @@ export function ClassLogin({
   onAuthenticated: (
     classId: number,
     className: string,
-    password: string,
     operator: string,
     token: string | null,
   ) => void;
@@ -46,14 +47,33 @@ export function ClassLogin({
         setError('请填写班级名称，密码至少 8 位。');
         return;
       }
+      // Class creation requires a proof-of-work challenge so bulk scripted
+      // creation costs CPU per attempt. Fetch a fresh challenge, solve it,
+      // then create.
       api
-        .post<BazaarClass>('/api/classes', { name, password })
+        .get<CreateChallenge>('/api/classes/challenge')
+        .then((challenge) => {
+          const challengeSolution = solveProofOfWork(challenge.nonce, challenge.difficulty);
+          return api.post<BazaarClass>('/api/classes', {
+            name,
+            password,
+            challenge_nonce: challenge.nonce,
+            challenge_solution: challengeSolution,
+          });
+        })
         // A newly created class has no token yet; authenticate immediately so
         // the rest of the session is token-backed like a normal login.
-        .then((c) =>
+        .then((createdClass) =>
           api
-            .post<AuthResponse>(`/api/classes/${c.id}/auth`, { password, operator })
-            .then((a) => onAuthenticated(c.id, c.name, password, operator, a.token ?? null)),
+            .post<AuthResponse>(`/api/classes/${createdClass.id}/auth`, { password, operator })
+            .then((authResponse) =>
+              onAuthenticated(
+                createdClass.id,
+                createdClass.name,
+                operator,
+                authResponse.token ?? null,
+              ),
+            ),
         )
         .catch((e: Error) => setError(e.message));
       return;
@@ -66,7 +86,7 @@ export function ClassLogin({
     if (!cls) return;
     api
       .post<AuthResponse>(`/api/classes/${selectedId}/auth`, { password, operator })
-      .then((a) => onAuthenticated(cls.id, cls.name, password, operator, a.token ?? null))
+      .then((a) => onAuthenticated(cls.id, cls.name, operator, a.token ?? null))
       .catch((e: Error) => setError(e.message));
   }
 

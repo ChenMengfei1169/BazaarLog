@@ -11,12 +11,12 @@ pub const MAX_OPERATOR_LENGTH: usize = 64;
 pub const MAX_TEXT_FIELD_LENGTH: usize = 200;
 pub const MAX_QUERY_FILTER_LENGTH: usize = 100;
 // Upper bound on a single transaction amount (100,000,000.00 CNY in cents).
-// Prevents absurd values from overflowing the SQL SUM aggregation or the
-// i64 arithmetic in the report summary.
+// Prevents absurd values from overflowing the SQL SUM aggregation or the i64
+// arithmetic in the report summary.
 pub const MAX_AMOUNT_CENTS: i64 = 10_000_000_000;
 
 /// Rejects an optional text field that exceeds the shared size limit.
-pub fn check_optional_text(value: &Option<String>, field_name: &str) -> AppResult<()> {
+pub fn check_optional_text(value: Option<&str>, field_name: &str) -> AppResult<()> {
     if let Some(text) = value {
         if text.chars().count() > MAX_TEXT_FIELD_LENGTH {
             return Err(AppError::BadRequest(format!(
@@ -54,7 +54,7 @@ pub fn check_rfc3339_timestamp(value: &str, field_name: &str) -> AppResult<()> {
 /// Rejects an optional date field that is not a valid YYYY-MM-DD value. The
 /// archive sweep compares the end date lexicographically, so a malformed date
 /// would silently break the archival window.
-pub fn check_optional_date(value: &Option<String>, field_name: &str) -> AppResult<()> {
+pub fn check_optional_date(value: Option<&str>, field_name: &str) -> AppResult<()> {
     if let Some(date) = value {
         if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
             return Err(AppError::BadRequest(format!(
@@ -68,7 +68,7 @@ pub fn check_optional_date(value: &Option<String>, field_name: &str) -> AppResul
 /// Rejects an optional filter value that is neither a YYYY-MM-DD date nor an
 /// RFC3339 timestamp, so malformed list filters fail loudly instead of
 /// silently returning empty results.
-pub fn check_optional_query_date(value: &Option<String>, field_name: &str) -> AppResult<()> {
+pub fn check_optional_query_date(value: Option<&str>, field_name: &str) -> AppResult<()> {
     if let Some(text) = value {
         let is_date = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d").is_ok();
         let is_timestamp = chrono::DateTime::parse_from_rfc3339(text).is_ok();

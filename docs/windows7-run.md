@@ -42,6 +42,7 @@ variables before launching:
 ```bat
 set BAZAARLOG_HOST=0.0.0.0
 set BAZAARLOG_PORT=9000
+set BAZAARLOG_ALLOW_PLAINTEXT_LAN=1
 BazaarLog.exe
 ```
 
@@ -49,6 +50,52 @@ Setting `BAZAARLOG_HOST=0.0.0.0` exposes the service on the LAN so other
 devices on the same network can open <http://<this-pc-ip>:3000>. Be mindful
 that BazaarLog has no transport-level security; only use this on a trusted
 network.
+
+> **Note**: binding to a non-loopback address over plaintext HTTP is refused
+> unless `BAZAARLOG_ALLOW_PLAINTEXT_LAN=1` is also set. The class password and
+> the session token travel in request headers and are readable by anyone
+> sniffing the network segment, so the server fails closed by default. Put a
+> TLS-terminating reverse proxy in front for anything beyond a trusted LAN.
+
+### The port is refused with "access denied" (os error 10013)
+
+On Windows, `WSAEACCES (os error 10013)` means the port is **reserved or held
+exclusively**, not simply busy. Hyper-V, WSL2, and Docker Desktop reserve blocks
+of TCP ports at boot, and those blocks are re-allocated on every reboot, so the
+default port `3000` can work today and fail tomorrow with no process holding it.
+Check which ranges are reserved:
+
+```bat
+netsh interface ipv4 show excludedportrange protocol=tcp
+```
+
+Pick a port outside every listed range and start BazaarLog on it:
+
+```bat
+set BAZAARLOG_PORT=8080
+BazaarLog.exe
+```
+
+`os error 10048` (address already in use) is a different problem: a real process
+is listening on the port. Find it with `netstat -ano | findstr :3000` and stop
+it, or choose another port.
+
+Note that changing the port also changes the URL to open in the browser, and
+the Vite dev server proxy in `frontend/vite.config.ts` still points at `3000`
+during frontend development.
+
+### Where the database is written
+
+`bazaarlog.db` and its `.audit.seal` sidecar are created in the **current
+working directory**, because the default `BAZAARLOG_DATABASE_URL` is the
+relative path `sqlite://bazaarlog.db?mode=rwc`. Launch the exe from a
+dedicated data folder rather than from `target\...\release\`, which is wiped by
+`cargo clean`. To keep the database somewhere fixed regardless of where the exe
+is launched from, set an absolute path:
+
+```bat
+set BAZAARLOG_DATABASE_URL=sqlite://C:/BazaarLog/bazaarlog.db?mode=rwc
+```
 
 ## PostgreSQL mode (optional)
 
@@ -81,14 +128,20 @@ PostgreSQL server.
 
 ## Environment variables
 
-| Variable                   | Default                          | Description                                            |
-|----------------------------|----------------------------------|--------------------------------------------------------|
-| `BAZAARLOG_DATABASE_URL`   | `sqlite://bazaarlog.db?mode=rwc` | `sqlite://` or `postgres://` connection string.        |
-| `BAZAARLOG_HOST`           | `127.0.0.1`                      | Bind address. Use `0.0.0.0` for LAN access.            |
-| `BAZAARLOG_PORT`           | `3000`                           | Listen port.                                           |
-| `BAZAARLOG_CACHE_TTL_SECS` | `30`                             | TTL for the in-memory report cache.                    |
-| `BAZAARLOG_ARCHIVE_DAYS`   | `365`                            | Days after `end_date` before a semester auto-archives. |
-| `RUST_LOG`                 | `info`                           | tracing filter (e.g. `debug,sqlx=warn`).               |
+| Variable                       | Default                          | Description                                            |
+|--------------------------------|----------------------------------|--------------------------------------------------------|
+| `BAZAARLOG_DATABASE_URL`       | `sqlite://bazaarlog.db?mode=rwc` | `sqlite://` or `postgres://` connection string.        |
+| `BAZAARLOG_HOST`               | `127.0.0.1`                      | Bind address. `0.0.0.0` needs `BAZAARLOG_ALLOW_PLAINTEXT_LAN=1`. |
+| `BAZAARLOG_PORT`               | `3000`                           | Listen port.                                           |
+| `BAZAARLOG_CACHE_TTL_SECS`     | `30`                             | TTL for the in-memory report (dashboard) cache. The audit-chain scan uses a fixed 5 s TTL instead; see README. |
+| `BAZAARLOG_ARCHIVE_DAYS`       | `365`                            | Days after `end_date` before a semester auto-archives. |
+| `BAZAARLOG_SESSION_TTL_HOURS`  | `4`                              | Login session lifetime in hours.                       |
+| `BAZAARLOG_POW_DIFFICULTY`     | `4`                              | Leading zero hex chars required in the class-creation proof of work (1–16). |
+| `BAZAARLOG_ENABLE_LEGACY_AUTH` | `0`                              | Set to `1` to re-enable the legacy `X-Class-Password` headers for pre-token scripts. |
+| `BAZAARLOG_ALLOW_PLAINTEXT_LAN`| `0`                              | Set to `1` to allow binding a non-loopback address over plaintext HTTP. |
+| `BAZAARLOG_HARDEN_DB_ACL`      | `1`                              | Windows only: tighten the ACL of the database and its `.audit.seal` file to the current user. `0` skips it. |
+| `BAZAARLOG_METRICS_TOKEN`      | _(unset)_                        | When set, `/metrics` requires `Authorization: Bearer <token>`; otherwise it is loopback-only. |
+| `RUST_LOG`                     | `info`                           | tracing filter (e.g. `debug,sqlx=warn`).               |
 
 ## Browser compatibility
 

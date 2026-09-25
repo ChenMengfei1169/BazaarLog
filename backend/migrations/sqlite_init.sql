@@ -36,13 +36,22 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    transaction_id INTEGER REFERENCES transactions(id) ON DELETE SET NULL,
+    -- Plain nullable column, deliberately WITHOUT a foreign key. Audit rows are
+    -- immutable evidence: a FK with ON DELETE SET NULL would rewrite the
+    -- create/update entries (and their chain hashes) whenever a transaction is
+    -- deleted, breaking the tamper-evident chain on a normal operation.
+    transaction_id INTEGER,
     class_id       INTEGER REFERENCES classes(id) ON DELETE CASCADE,
     action         TEXT NOT NULL CHECK (action IN ('create', 'update', 'delete')),
     operator       TEXT NOT NULL,
     payload_before TEXT,
     payload_after  TEXT,
-    occurred_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+    occurred_at    TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    -- Tamper-evident chain: prev_hash points at the previous row's entry_hash
+    -- and entry_hash commits this row's content to SHA-256. Any deletion or
+    -- edit breaks every subsequent link (see audit.rs).
+    prev_hash      TEXT NOT NULL DEFAULT '',
+    entry_hash     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_transactions_semester_time

@@ -9,14 +9,17 @@ embedded frontend is also served from the same origin, so a single
 - Money is always represented as integer cents (`amount_cents`). For example,
   `1234` means `12.34 CNY`.
 - Timestamps are RFC3339 UTC strings (e.g. `2026-03-04T08:30:00Z`).
-- All mutating requests that touch a class's data require three headers:
-  - `X-Class-Id` - the class the caller is operating on
-  - `X-Class-Password` - that class's plaintext password (verified server-side
-    against an Argolid hash)
-  - `X-Operator` - display name recorded in the audit log (defaults to
-    `anonymous`)
+- Authenticated endpoints require the session token returned by
+  `POST /api/classes/:id/auth`, sent as the `X-Session-Token` header. The
+  token is bound to the client IP and User-Agent captured at login and expires
+  after `BAZAARLOG_SESSION_TTL_HOURS` (default 4).
+- Legacy password headers (`X-Class-Id` + `X-Class-Password` +
+  `X-Operator`) are only accepted when the server is started with
+  `BAZAARLOG_ENABLE_LEGACY_AUTH=1`; they are disabled by default.
 - Errors are returned as `{"error": "<message>"}` with an appropriate HTTP
   status code. The body never leaks internal details for 5xx errors.
+- Rate limits and the per-class failed-login lockout (10 failures / 5 minutes,
+  independent of source IP) answer with HTTP 429.
 
 ## Endpoints
 
@@ -32,12 +35,14 @@ BAZAARLOG_METRICS_TOKEN is set; otherwise only loopback clients may read it.
 
 ## Classes
 
-| Method | Path                          | Auth  | Description                                                                                        |
-|--------|-------------------------------|-------|----------------------------------------------------------------------------------------------------|
-| GET    | `/api/classes`                | none  | List all class names (no password hashes exposed).                                                 |
-| POST   | `/api/classes`                | none  | Create a class. Body: `{name, password}`. Returns the new class.                                   |
-| POST   | `/api/classes/:id/auth`       | none  | Verify a password. Body: `{password}`. Returns `{"authenticated":true}` on success, 401 otherwise. |
-| GET    | `/api/classes/:id/audit_logs` | class | Returns up to 200 most recent audit log entries.                                                   |
+| Method | Path                                  | Auth  | Description                                                                                                                       |
+|--------|---------------------------------------|-------|------------------------------------------------------------------------------------------------------------------------------------|
+| GET    | `/api/classes`                      | none  | List all class names (no password hashes exposed).                                                                                 |
+| GET    | `/api/classes/challenge`            | none  | Issue a single-use proof-of-work challenge: `{"nonce","difficulty"}`. Required before creating a class.                            |
+| POST   | `/api/classes`                      | none  | Create a class. Body: `{name, password, challenge_nonce, challenge_solution}`. Returns the new class.                            |
+| POST   | `/api/classes/:id/auth`             | none  | Verify a password. Body: `{password, operator?}`. Returns `{"authenticated":true,"token":"<64-hex>"}` on success, 401 otherwise. |
+| GET    | `/api/classes/:id/audit_logs`       | class | Returns up to 200 most recent audit log entries, including `prev_hash` and `entry_hash`.                                        |
+| GET    | `/api/classes/:id/audit_logs/chain` | class | Verifies the tamper-evident audit hash chain: `{"verified":bool,"first_broken_id":number|null,"truncated":bool}`.                |
 
 ### Semesters
 
@@ -111,6 +116,8 @@ BAZAARLOG_METRICS_TOKEN is set; otherwise only loopback clients may read it.
   "action": "create", "operator": "Zhang San",
   "payload_before": null,
   "payload_after": "{\"id\":1,...}",
-  "occurred_at": "2026-03-05T09:30:05Z"
+  "occurred_at": "2026-03-05T09:30:05Z",
+  "prev_hash": "<sha256 of the previous entry>",
+  "entry_hash": "<sha256 committing this entry to the chain>"
 }
 ```

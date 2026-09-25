@@ -16,7 +16,6 @@ type Tab = 'transactions' | 'report' | 'audit';
 interface ActiveClass {
   id: number;
   name: string;
-  password: string;
   operator: string;
   token: string | null;
 }
@@ -29,15 +28,16 @@ export function App(): JSX.Element {
   function handleAuthenticated(
     classId: number,
     className: string,
-    password: string,
     operator: string,
     token: string | null,
   ): void {
     // Use the operator typed on the login form so the audit log attributes
-    // each mutation to the right person instead of always 'anonymous'.
+    // each mutation to the right person instead of always 'anonymous'. The
+    // password is not retained: the session token is the only credential the
+    // API accepts.
     const operatorName = operator.trim() || 'anonymous';
-    setSession({ classId, password, operator: operatorName, token });
-    setActiveClass({ id: classId, name: className, password, operator: operatorName, token });
+    setSession({ classId, operator: operatorName, token });
+    setActiveClass({ id: classId, name: className, operator: operatorName, token });
     setSemester(null);
     setTab('transactions');
   }

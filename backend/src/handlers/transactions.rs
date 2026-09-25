@@ -1,23 +1,36 @@
-// Transaction CRUD. Reads within a semester require ClassAuth (data isolation
-// between classes). Writes additionally record an audit entry inside the same
-// database transaction so the operation log never drifts from the data.
+// Transaction CRUD. Reads within a semester require ClassAuth, which keeps data
+// isolated between classes. Writes additionally record an audit entry inside the
+// same database transaction so the operation log never drifts from the data.
 use axum::extract::{Path, Query, State};
 use axum::Json;
 use sqlx::Row;
 
 use crate::auth::ClassAuth;
 use crate::error::{AppError, AppResult};
-use crate::handlers::{lookup_semester_class, now_rfc3339, record_audit, row_to_transaction};
-use crate::limits::{
-    check_optional_query_date, check_optional_text, check_required_text,
-    check_rfc3339_timestamp, MAX_AMOUNT_CENTS, MAX_OPERATOR_LENGTH, MAX_QUERY_FILTER_LENGTH,
+use crate::handlers::{
+    foreign_resource, lookup_semester_class, now_rfc3339, record_audit, report_cache_key,
+    row_to_transaction, AUDIT_CHAIN_CACHE_KEY,
 };
-use crate::models::{CreateTransaction, TransactionList, TransactionQuery};
+use crate::limits::{
+    check_optional_query_date, check_optional_text, check_required_text, check_rfc3339_timestamp,
+    MAX_AMOUNT_CENTS, MAX_OPERATOR_LENGTH, MAX_QUERY_FILTER_LENGTH,
+};
+use crate::models::{CreateTransaction, Transaction, TransactionList, TransactionQuery};
 use crate::state::AppState;
 
-// GET /api/semesters/:id/transactions - filtered, paginated listing. Filters
-// are pure conjunctions so the composite index (semester_id, occurred_at) and
-// (class_id, kind, occurred_at) cover the common access patterns.
+const DEFAULT_PAGE_SIZE: i64 = 20;
+const MAX_PAGE_SIZE: i64 = 200;
+// Bounds the page number so the derived offset cannot overflow i64.
+const MAX_PAGE_NUMBER: i64 = 1_000_000;
+
+// Column list shared by every transaction read so the mapping in
+// row_to_transaction always has the columns it expects.
+const TRANSACTION_COLUMNS: &str = "id, semester_id, class_id, kind, amount_cents, source, \
+                                   purpose, item, operator, occurred_at, created_at";
+
+/// GET /api/semesters/:id/transactions - filtered, paginated listing. Filters are
+/// pure conjunctions so the composite indexes on (semester_id, occurred_at) and
+/// (class_id, kind, occurred_at) cover the common access patterns.
 pub async fn list_transactions(
     State(state): State<AppState>,
     Path(semester_id): Path<i64>,
@@ -26,16 +39,17 @@ pub async fn list_transactions(
 ) -> AppResult<Json<TransactionList>> {
     let class_id = lookup_semester_class(&state, semester_id).await?;
     if class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+        return Err(foreign_resource());
     }
     validate_transaction_query(&query)?;
-    // Bound the page so the derived offset cannot overflow i64.
-    const MAX_PAGE_NUMBER: i64 = 1_000_000;
     let page = query.page.unwrap_or(1).clamp(1, MAX_PAGE_NUMBER);
-    let page_size = query.page_size.unwrap_or(20).clamp(1, 200);
+    let page_size = query
+        .page_size
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE);
     let offset = (page - 1) * page_size;
 
-    // semester_id is a BIGINT/INTEGER column and must be bound as i64.
+    // semester_id is a BIGINT or INTEGER column and must be bound as i64.
     // Binding it through the string-based binds array would trigger a
     // text-to-bigint type mismatch on PostgreSQL.
     let mut where_clause = String::from("semester_id = ?");
@@ -52,7 +66,7 @@ pub async fn list_transactions(
         // datetime-local inputs may send only the date portion (YYYY-MM-DD).
         // Append end-of-day time so the <= comparison covers the full day.
         where_clause.push_str(" AND occurred_at <= ?");
-        binds.push(format!("{}T23:59:59Z", to));
+        binds.push(format!("{to}T23:59:59Z"));
     }
     if let Some(search) = &query.search {
         where_clause.push_str(
@@ -66,25 +80,25 @@ pub async fn list_transactions(
         binds.push(pattern);
     }
 
-    let count_sql = format!("SELECT COUNT(*) AS cnt FROM transactions WHERE {where_clause}");
+    let count_sql =
+        format!("SELECT COUNT(*) AS transaction_count FROM transactions WHERE {where_clause}");
     // semester_id is bound as i64 before the dynamic binds.
     let mut count_query = sqlx::query(&count_sql).bind(semester_id);
-    for b in &binds {
-        count_query = count_query.bind(b);
+    for bind_value in &binds {
+        count_query = count_query.bind(bind_value);
     }
     let total: i64 = count_query
         .fetch_one(&state.pool)
         .await?
-        .try_get::<i64, _>("cnt")?;
+        .try_get::<i64, _>("transaction_count")?;
 
     let list_sql = format!(
-        "SELECT id, semester_id, class_id, kind, amount_cents, source, purpose, item, \
-         operator, occurred_at, created_at FROM transactions WHERE {where_clause} \
+        "SELECT {TRANSACTION_COLUMNS} FROM transactions WHERE {where_clause} \
          ORDER BY occurred_at DESC, id DESC LIMIT ? OFFSET ?"
     );
     let mut list_query = sqlx::query(&list_sql).bind(semester_id);
-    for b in &binds {
-        list_query = list_query.bind(b);
+    for bind_value in &binds {
+        list_query = list_query.bind(bind_value);
     }
     list_query = list_query.bind(page_size).bind(offset);
     let rows = list_query.fetch_all(&state.pool).await?;
@@ -100,22 +114,28 @@ pub async fn list_transactions(
     }))
 }
 
-// POST /api/semesters/:id/transactions
+/// POST /api/semesters/:id/transactions
 pub async fn create_transaction(
     State(state): State<AppState>,
     Path(semester_id): Path<i64>,
     auth: ClassAuth,
     Json(body): Json<CreateTransaction>,
-) -> AppResult<Json<crate::models::Transaction>> {
+) -> AppResult<Json<Transaction>> {
     let class_id = lookup_semester_class(&state, semester_id).await?;
     if class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+        return Err(foreign_resource());
     }
-    ensure_semester_writable(&state.pool, semester_id).await?;
     validate_transaction_body(&body)?;
     let occurred_at = body.occurred_at.unwrap_or_else(now_rfc3339);
 
-    let mut tx = state.pool.begin().await?;
+    // Hold the mutation guard across the whole transaction so the audit chain
+    // anchor read inside record_audit can never race another writer.
+    let _mutation_guard = state.mutation_guard.lock().await;
+    let mut transaction = state.pool.begin().await?;
+    // The writability check runs inside the transaction. Checking it against the
+    // pool instead left a window where a concurrent archive could commit between
+    // the check and the insert, writing into a read-only semester.
+    ensure_semester_writable(&mut *transaction, semester_id).await?;
     let row = sqlx::query(
         "INSERT INTO transactions \
          (semester_id, class_id, kind, amount_cents, source, purpose, item, operator, \
@@ -134,73 +154,74 @@ pub async fn create_transaction(
     .bind(body.operator.trim())
     .bind(&occurred_at)
     .bind(now_rfc3339())
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *transaction)
     .await?;
-    let transaction = row_to_transaction(&row)?;
-    let after = serde_json::to_string(&transaction).ok();
+    let created_transaction = row_to_transaction(&row)?;
+    let payload_after = serde_json::to_string(&created_transaction).ok();
     record_audit(
-        &mut tx,
+        &mut transaction,
         class_id,
-        Some(transaction.id),
+        Some(created_transaction.id),
         "create",
         &auth.operator,
         None,
-        after,
+        payload_after,
     )
     .await?;
-    tx.commit().await?;
-    state
-        .cache
-        .invalidate(&crate::handlers::report_cache_key(semester_id));
-    Ok(Json(transaction))
+    transaction.commit().await?;
+    state.cache.invalidate(&report_cache_key(semester_id));
+    state.cache.invalidate(AUDIT_CHAIN_CACHE_KEY);
+    crate::audit::refresh_seal(&state.pool, &state.config.database_url).await?;
+    Ok(Json(created_transaction))
 }
 
-// GET /api/transactions/:id
+/// GET /api/transactions/:id
 pub async fn get_transaction(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     auth: ClassAuth,
-) -> AppResult<Json<crate::models::Transaction>> {
-    let row = sqlx::query(
-        "SELECT id, semester_id, class_id, kind, amount_cents, source, purpose, item, \
-         operator, occurred_at, created_at FROM transactions WHERE id = ?",
-    )
+) -> AppResult<Json<Transaction>> {
+    let row = sqlx::query(&format!(
+        "SELECT {TRANSACTION_COLUMNS} FROM transactions WHERE id = ?"
+    ))
     .bind(id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or(AppError::NotFound)?;
-    let tx = row_to_transaction(&row)?;
-    if tx.class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+    let transaction = row_to_transaction(&row)?;
+    if transaction.class_id != auth.class_id {
+        return Err(foreign_resource());
     }
-    Ok(Json(tx))
+    Ok(Json(transaction))
 }
 
-// PUT /api/transactions/:id
+/// PUT /api/transactions/:id
 pub async fn update_transaction(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     auth: ClassAuth,
     Json(body): Json<CreateTransaction>,
-) -> AppResult<Json<crate::models::Transaction>> {
+) -> AppResult<Json<Transaction>> {
     validate_transaction_body(&body)?;
     let occurred_at = body.occurred_at.unwrap_or_else(now_rfc3339);
 
-    let mut tx = state.pool.begin().await?;
-    let existing_row = sqlx::query(
-        "SELECT id, semester_id, class_id, kind, amount_cents, source, purpose, item, \
-         operator, occurred_at, created_at FROM transactions WHERE id = ?",
-    )
+    // Hold the mutation guard across the whole transaction so the audit chain
+    // anchor read inside record_audit can never race another writer.
+    let _mutation_guard = state.mutation_guard.lock().await;
+    let mut transaction = state.pool.begin().await?;
+    let existing_row = sqlx::query(&format!(
+        "SELECT {TRANSACTION_COLUMNS} FROM transactions WHERE id = ?"
+    ))
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *transaction)
     .await?
     .ok_or(AppError::NotFound)?;
     let existing = row_to_transaction(&existing_row)?;
     if existing.class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+        return Err(foreign_resource());
     }
-    ensure_semester_writable(&mut *tx, existing.semester_id).await?;
-    let before = serde_json::to_string(&existing).ok();
+    ensure_semester_writable(&mut *transaction, existing.semester_id).await?;
+    let payload_before = serde_json::to_string(&existing).ok();
 
     let row = sqlx::query(
         "UPDATE transactions SET \
@@ -217,72 +238,76 @@ pub async fn update_transaction(
     .bind(body.operator.trim())
     .bind(&occurred_at)
     .bind(id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *transaction)
     .await?;
-    let updated = row_to_transaction(&row)?;
-    let after = serde_json::to_string(&updated).ok();
+    let updated_transaction = row_to_transaction(&row)?;
+    let payload_after = serde_json::to_string(&updated_transaction).ok();
     record_audit(
-        &mut tx,
+        &mut transaction,
         existing.class_id,
         Some(id),
         "update",
         &auth.operator,
-        before,
-        after,
+        payload_before,
+        payload_after,
     )
     .await?;
-    tx.commit().await?;
+    transaction.commit().await?;
     state
         .cache
-        .invalidate(&crate::handlers::report_cache_key(existing.semester_id));
-    Ok(Json(updated))
+        .invalidate(&report_cache_key(existing.semester_id));
+    state.cache.invalidate(AUDIT_CHAIN_CACHE_KEY);
+    crate::audit::refresh_seal(&state.pool, &state.config.database_url).await?;
+    Ok(Json(updated_transaction))
 }
 
-// DELETE /api/transactions/:id
+/// DELETE /api/transactions/:id
 pub async fn delete_transaction(
     State(state): State<AppState>,
     Path(id): Path<i64>,
     auth: ClassAuth,
 ) -> AppResult<Json<serde_json::Value>> {
-    let mut tx = state.pool.begin().await?;
-    let row = sqlx::query(
-        "SELECT id, semester_id, class_id, kind, amount_cents, source, purpose, item, \
-         operator, occurred_at, created_at FROM transactions WHERE id = ?",
-    )
+    // Hold the mutation guard across the whole transaction so the audit chain
+    // anchor read inside record_audit can never race another writer.
+    let _mutation_guard = state.mutation_guard.lock().await;
+    let mut transaction = state.pool.begin().await?;
+    let row = sqlx::query(&format!(
+        "SELECT {TRANSACTION_COLUMNS} FROM transactions WHERE id = ?"
+    ))
     .bind(id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *transaction)
     .await?
     .ok_or(AppError::NotFound)?;
     let existing = row_to_transaction(&row)?;
     if existing.class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+        return Err(foreign_resource());
     }
-    ensure_semester_writable(&mut *tx, existing.semester_id).await?;
-    let before = serde_json::to_string(&existing).ok();
-    // Delete the row first, then record the audit entry. Inserting the audit
-    // row before to delete would create a transient FK reference to the row
-    // being removed, which SQLite's ON DELETE SET NULL resolves but some
-    // connection configurations reject mid-transaction. By deleting first and
-    // storing transaction_id = None on the audit row, we avoid the circular
-    // reference entirely while still preserving the full before-snapshot.
+    ensure_semester_writable(&mut *transaction, existing.semester_id).await?;
+    let payload_before = serde_json::to_string(&existing).ok();
+    // Delete the row first, then append the audit entry. Audit rows are
+    // immutable evidence, so the delete entry records transaction_id = None
+    // because the row itself no longer exists, while the before-snapshot
+    // preserves the full original content.
     sqlx::query("DELETE FROM transactions WHERE id = ?")
         .bind(id)
-        .execute(&mut *tx)
+        .execute(&mut *transaction)
         .await?;
     record_audit(
-        &mut tx,
+        &mut transaction,
         existing.class_id,
         None,
         "delete",
         &auth.operator,
-        before,
+        payload_before,
         None,
     )
     .await?;
-    tx.commit().await?;
+    transaction.commit().await?;
     state
         .cache
-        .invalidate(&crate::handlers::report_cache_key(existing.semester_id));
+        .invalidate(&report_cache_key(existing.semester_id));
+    state.cache.invalidate(AUDIT_CHAIN_CACHE_KEY);
+    crate::audit::refresh_seal(&state.pool, &state.config.database_url).await?;
     Ok(Json(serde_json::json!({ "deleted": id })))
 }
 
@@ -296,8 +321,8 @@ fn validate_kind(kind: &str) -> AppResult<()> {
     }
 }
 
-// Shared validation for create and update so both paths enforce the same
-// bounds on every user-controlled field before it reaches the database.
+/// Shared validation for create and update so both paths enforce the same bounds
+/// on every user-controlled field before it reaches the database.
 fn validate_transaction_body(body: &CreateTransaction) -> AppResult<()> {
     validate_kind(&body.kind)?;
     if body.amount_cents <= 0 {
@@ -309,18 +334,18 @@ fn validate_transaction_body(body: &CreateTransaction) -> AppResult<()> {
         )));
     }
     check_required_text(&body.operator, "operator", MAX_OPERATOR_LENGTH)?;
-    check_optional_text(&body.source, "source")?;
-    check_optional_text(&body.purpose, "purpose")?;
-    check_optional_text(&body.item, "item")?;
+    check_optional_text(body.source.as_deref(), "source")?;
+    check_optional_text(body.purpose.as_deref(), "purpose")?;
+    check_optional_text(body.item.as_deref(), "item")?;
     if let Some(occurred_at) = &body.occurred_at {
         check_rfc3339_timestamp(occurred_at, "occurred_at")?;
     }
     Ok(())
 }
 
-// Rejects oversized or malformed filter values before they reach the database.
-// The search term feeds a LIKE pattern, so bounding its length prevents an
-// attacker from forcing a pathological full-table scan.
+/// Rejects oversized or malformed filter values before they reach the database.
+/// The search term feeds a LIKE pattern, so bounding its length prevents an
+/// attacker from forcing a pathological full-table scan.
 fn validate_transaction_query(query: &TransactionQuery) -> AppResult<()> {
     if let Some(kind) = &query.kind {
         if kind != "income" && kind != "expense" {
@@ -336,20 +361,24 @@ fn validate_transaction_query(query: &TransactionQuery) -> AppResult<()> {
             )));
         }
     }
-    check_optional_query_date(&query.from, "from")?;
-    check_optional_query_date(&query.to, "to")?;
+    check_optional_query_date(query.from.as_deref(), "from")?;
+    check_optional_query_date(query.to.as_deref(), "to")?;
     Ok(())
 }
 
-// Escapes LIKE wildcards so user input is matched literally instead of acting
-// as a pattern. The '/' escape character is omitted from the pattern itself.
+/// Escapes LIKE wildcards so user input is matched literally instead of acting
+/// as a pattern. The '/' escape character is escaped first so it survives the
+/// replacements that follow.
 fn escape_like(value: &str) -> String {
-    value.replace('/', "//").replace('%', "/%").replace('_', "/_")
+    value
+        .replace('/', "//")
+        .replace('%', "/%")
+        .replace('_', "/_")
 }
 
-// Blocks mutations on an archived semester so the read-only promise shown in
-// the UI is enforced server-side too, not just in the browser. Runs through
-// the caller's executor so it can participate in an open database transaction.
+/// Blocks mutations on an archived semester so the read-only promise shown in
+/// the UI is enforced server-side too, not just in the browser. Runs through the
+/// caller's executor so it can participate in an open database transaction.
 async fn ensure_semester_writable<'e, E>(executor: E, semester_id: i64) -> AppResult<()>
 where
     E: sqlx::Executor<'e, Database = sqlx::Any>,
@@ -362,7 +391,7 @@ where
     // PostgreSQL maps SMALLINT to i16; SQLite maps INTEGER to i64.
     let archived_int: i64 = row
         .try_get::<i16, _>("archived")
-        .map(|smallint_value| smallint_value as i64)
+        .map(i64::from)
         .or_else(|_| row.try_get::<i64, _>("archived"))?;
     if archived_int != 0 {
         return Err(AppError::Conflict(

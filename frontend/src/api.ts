@@ -1,10 +1,12 @@
-// Thin fetch wrapper that injects per-class authentication headers and
-// normalizes API errors into a consistent Error shape. The class id and
-// password are held in memory only (no localStorage), so a browser refresh
-// logs the user out.
+// Thin fetch wrapper that injects the session token and normalizes API errors
+// into a consistent Error shape. The session lives in memory only (no
+// localStorage), so a browser refresh logs the user out.
+//
+// The class password is deliberately NOT kept here. Every authenticated request
+// carries the server-issued session token, so retaining the plaintext password
+// past login would only widen the blast radius of an XSS or a memory dump.
 export interface Session {
   classId: number;
-  password: string;
   operator: string;
   token: string | null;
 }
@@ -32,22 +34,14 @@ export function getSession(): Session | null {
   return session;
 }
 
-// Builds a Headers object with the per-class authentication headers. fetch's
-// Headers only accepts ISO-8859-1 characters, so non-ASCII values (Chinese
-// operator names, passwords) would throw "String contains non ISO-8859-1 code
-// point". encodeURIComponent converts them to pure ASCII; the backend
-// percent-decodes them back in auth.rs. Shared by request() and download().
+// Builds a Headers object with the session token. The backend only accepts
+// server-issued session tokens (the legacy password-header path is disabled by
+// default), so the operator name recorded in the audit log always comes from
+// the login, never from a client-declared header.
 function buildAuthHeaders(base?: HeadersInit): Headers {
   const headers = new Headers(base);
   if (session?.token) {
-    // Server-issued session token binds the class id and the operator name,
-    // so the audit log cannot be spoofed via a client header.
     headers.set('X-Session-Token', session.token);
-  } else if (session) {
-    // Legacy password-header path for pre-token clients and scripts.
-    headers.set('X-Class-Id', String(session.classId));
-    headers.set('X-Class-Password', encodeURIComponent(session.password));
-    headers.set('X-Operator', encodeURIComponent(session.operator));
   }
   return headers;
 }

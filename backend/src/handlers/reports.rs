@@ -9,11 +9,16 @@ use sqlx::Row;
 use crate::auth::ClassAuth;
 use crate::error::{AppError, AppResult};
 use crate::excel::build_excel;
-use crate::handlers::{lookup_semester_class, report_cache_key};
+use crate::handlers::{foreign_resource, lookup_semester_class, report_cache_key};
 use crate::models::{ItemRanking, Report, ReportSummary};
 use crate::state::AppState;
 
-// GET /api/semesters/:id/report
+/// Upper bound on the rows a single Excel export will materialize. The export
+/// loads every row into memory and then builds the whole workbook in memory, so
+/// an unbounded semester is a memory exhaustion vector.
+const MAX_EXPORT_ROWS: usize = 50_000;
+
+/// GET /api/semesters/:id/report
 pub async fn get_report(
     State(state): State<AppState>,
     Path(semester_id): Path<i64>,
@@ -21,7 +26,7 @@ pub async fn get_report(
 ) -> AppResult<Json<Report>> {
     let class_id = lookup_semester_class(&state, semester_id).await?;
     if class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+        return Err(foreign_resource());
     }
     let cache_key = report_cache_key(semester_id);
     if let Some(cached) = state.cache.get(&cache_key) {
@@ -41,7 +46,7 @@ pub async fn get_report(
     Ok(Json(report))
 }
 
-// GET /api/semesters/:id/export.xlsx
+/// GET /api/semesters/:id/export.xlsx
 pub async fn export_excel(
     State(state): State<AppState>,
     Path(semester_id): Path<i64>,
@@ -49,7 +54,7 @@ pub async fn export_excel(
 ) -> AppResult<impl IntoResponse> {
     let class_id = lookup_semester_class(&state, semester_id).await?;
     if class_id != auth.class_id {
-        return Err(AppError::Unauthorized);
+        return Err(foreign_resource());
     }
     let transactions = fetch_all_transactions(&state, semester_id).await?;
     let summary = fetch_summary(&state, semester_id).await?;
@@ -58,8 +63,12 @@ pub async fn export_excel(
         summary,
         item_ranking,
     };
-    let bytes = build_excel(&transactions, &report)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    // Building the workbook is synchronous and CPU-bound, so it runs on the
+    // blocking pool instead of occupying an async worker thread.
+    let bytes = tokio::task::spawn_blocking(move || build_excel(&transactions, &report))
+        .await
+        .map_err(|error| AppError::Internal(anyhow::anyhow!("excel export task failed: {error}")))?
+        .map_err(|error| AppError::Internal(anyhow::anyhow!(error)))?;
     let headers = [
         (
             axum::http::header::CONTENT_TYPE,
@@ -100,21 +109,21 @@ async fn fetch_item_ranking(state: &AppState, semester_id: i64) -> AppResult<Vec
     let rows = sqlx::query(
         "SELECT \
          COALESCE(NULLIF(item, ''), '(unspecified)') AS item_name, \
-         COUNT(*) AS qty, \
+         COUNT(*) AS quantity, \
          COALESCE(SUM(amount_cents), 0) AS total_cents \
          FROM transactions WHERE semester_id = ? AND kind = 'income' \
-         GROUP BY item_name ORDER BY qty DESC, total_cents DESC LIMIT 20",
+         GROUP BY item_name ORDER BY quantity DESC, total_cents DESC LIMIT 20",
     )
     .bind(semester_id)
     .fetch_all(&state.pool)
     .await?;
     let ranking = rows
         .iter()
-        .map(|r| {
+        .map(|row| {
             Ok(ItemRanking {
-                item: r.try_get::<String, _>("item_name")?,
-                quantity: r.try_get::<i64, _>("qty")?,
-                total_cents: r.try_get::<i64, _>("total_cents")?,
+                item: row.try_get::<String, _>("item_name")?,
+                quantity: row.try_get::<i64, _>("quantity")?,
+                total_cents: row.try_get::<i64, _>("total_cents")?,
             })
         })
         .collect::<Result<_, AppError>>()?;
@@ -125,14 +134,23 @@ async fn fetch_all_transactions(
     state: &AppState,
     semester_id: i64,
 ) -> AppResult<Vec<crate::models::Transaction>> {
+    // One extra row is fetched so an over-limit semester is reported rather than
+    // silently truncated; a truncated ledger export would be misleading.
     let rows = sqlx::query(
         "SELECT id, semester_id, class_id, kind, amount_cents, source, purpose, item, \
          operator, occurred_at, created_at FROM transactions \
-         WHERE semester_id = ? ORDER BY occurred_at, id",
+         WHERE semester_id = ? ORDER BY occurred_at, id LIMIT ?",
     )
     .bind(semester_id)
+    .bind(MAX_EXPORT_ROWS as i64 + 1)
     .fetch_all(&state.pool)
     .await?;
+    if rows.len() > MAX_EXPORT_ROWS {
+        return Err(AppError::BadRequest(format!(
+            "this semester has more than {MAX_EXPORT_ROWS} transactions, which is \
+             more than a single export can hold; export a narrower date range instead"
+        )));
+    }
     rows.iter()
         .map(crate::handlers::row_to_transaction)
         .collect()

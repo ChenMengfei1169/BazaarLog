@@ -16,6 +16,12 @@ export default defineConfig({
   },
   server: {
     port: 5173,
+    // Pin the dev server's CORS allow-list explicitly instead of relying on the
+    // bundler default. A permissive dev server lets any website the developer
+    // visits read responses from http://localhost:5173 (GHSA-67mh-4wv8-2f99).
+    cors: {
+      origin: [/^https?:\/\/(?:(?:[^:]+\.)?localhost|127\.0\.0\.1|\[::1\])(?::\d+)?$/],
+    },
     proxy: {
       '/api': 'http://127.0.0.1:3000',
       '/metrics': 'http://127.0.0.1:3000',

@@ -4,10 +4,12 @@ import { useEffect, useState } from 'react';
 
 import { api } from '../api';
 import { formatDateTime } from '../format';
-import type { AuditLog } from '../types';
+import type { AuditChainReport, AuditLog } from '../types';
 
 export function AuditPage({ classId }: { classId: number }): JSX.Element {
   const [logs, setLogs] = useState<AuditLog[]>([]);
+  const [chainVerified, setChainVerified] = useState(true);
+  const [truncated, setTruncated] = useState(false);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -15,9 +17,30 @@ export function AuditPage({ classId }: { classId: number }): JSX.Element {
       .get<AuditLog[]>(`/api/classes/${classId}/audit_logs`)
       .then(setLogs)
       .catch((e: Error) => setError(e.message));
+    // Verify the tamper-evident hash chain; a broken chain means some audit
+    // record was deleted or edited outside the application.
+    api
+      .get<AuditChainReport>(`/api/classes/${classId}/audit_logs/chain`)
+      .then((report) => {
+        setChainVerified(report.verified);
+        setTruncated(report.truncated);
+      })
+      .catch(() => setChainVerified(false));
   }, [classId]);
 
   if (error) return <p className="text-negative text-sm">{error}</p>;
+  if (!chainVerified) {
+    return (
+      <div className="card border-negative">
+        <p className="text-negative text-sm font-bold">审计链完整性校验失败</p>
+        <p className="text-negative text-sm mt-1">
+          {truncated
+            ? '外部封印文件与数据库中的最新哈希不一致：操作日志的尾部可能被删除或回滚，或封印文件被移除。请立即检查数据库与封印文件（.audit.seal）的访问权限，并核对最近一次的审计备份。'
+            : '操作日志哈希链出现断裂：可能有记录被外部修改或删除。请立即检查数据库文件的访问权限，并核对最近一次的审计备份。'}
+        </p>
+      </div>
+    );
+  }
   if (logs.length === 0) return <p className="text-ink-300 text-sm">暂无操作记录。</p>;
 
   return (

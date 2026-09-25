@@ -65,6 +65,27 @@ export interface AuditLog {
   payload_before: string | null;
   payload_after: string | null;
   occurred_at: string;
+  // Audit chain hashes; entry_hash commits this row's content, prev_hash
+  // links to the previous row. A missing or mismatching chain flags tampering.
+  prev_hash: string;
+  entry_hash: string;
+}
+
+// Result of verifying the tamper-evident audit hash chain.
+export interface AuditChainReport {
+  verified: boolean;
+  first_broken_id: number | null;
+  // True when the database's newest entry_hash disagrees with the external
+  // seal file, i.e. the tail of the audit log was deleted or rolled back.
+  // `verified` is also false in that case; this field distinguishes a broken
+  // link in the middle of the chain from a truncated tail.
+  truncated: boolean;
+}
+
+// Proof-of-work challenge issued by GET /api/classes/challenge.
+export interface CreateChallenge {
+  nonce: string;
+  difficulty: number;
 }
 
 export interface TransactionQuery {
